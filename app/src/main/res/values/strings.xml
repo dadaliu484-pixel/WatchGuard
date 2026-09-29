@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">WatchGuard</string>
+    <string name="app_desc">手表防丢卫士</string>
+    <string name="channel_guard_name">WatchGuard 守护服务</string>
+    <string name="channel_guard_desc">实时监控蓝牙链路状态与断连防护</string>
+    <string name="channel_alarm_name">WatchGuard 紧急防丢警报</string>
+    <string name="channel_alarm_desc">手表脱离范围时触发的高优先级强警报</string>
+    <string name="alarm_tts_text">警告：手表已断开连接！请立即检查！</string>
+</resources>
