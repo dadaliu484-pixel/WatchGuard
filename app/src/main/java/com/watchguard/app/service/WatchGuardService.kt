@@ -21,6 +21,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.watchguard.app.R
+import com.watchguard.app.WatchGuardApp
 import com.watchguard.app.data.model.DisconnectRecord
 import com.watchguard.app.data.model.GuardConfig
 import com.watchguard.app.data.repository.GuardPreferences
