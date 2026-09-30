@@ -157,9 +157,13 @@ class AlertPlayer(private val context: Context) : TextToSpeech.OnInitListener {
             if (alarmUri == null) {
                 alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             }
+            val playbackUri = alarmUri ?: run {
+                Log.w(TAG, "No alarm sound URI available")
+                return
+            }
 
             mediaPlayer = MediaPlayer().apply {
-                setDataSource(context, alarmUri)
+                setDataSource(context, playbackUri)
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
