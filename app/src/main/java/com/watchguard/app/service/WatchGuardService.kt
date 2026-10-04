@@ -27,10 +27,13 @@ import com.watchguard.app.data.model.GuardConfig
 import com.watchguard.app.data.repository.GuardPreferences
 import com.watchguard.app.ui.MainActivity
 import com.watchguard.app.util.MapIntentHelper
+import com.watchguard.app.util.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 守护运行状态枚举
@@ -65,6 +69,9 @@ class WatchGuardService : Service() {
 
     private var currentConfig = GuardConfig()
     private var debounceJob: Job? = null
+    private var locationJob: Job? = null
+    private var foregroundStarted = false
+    private var locationForegroundAvailable = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val _guardStatus = MutableStateFlow(GuardStatus.STOPPED)
@@ -152,19 +159,37 @@ class WatchGuardService : Service() {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val serviceType = if (PermissionHelper.hasLocationPermission(this) && locationTracker.isLocationEnabled()) {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 } else {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 }
-                startForeground(NOTIFICATION_ID_GUARD, notification, serviceType)
+                try {
+                    startForeground(NOTIFICATION_ID_GUARD, notification, serviceType)
+                    locationForegroundAvailable = serviceType and ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION != 0
+                } catch (e: SecurityException) {
+                    // A boot/background restart may only have while-in-use permission.
+                    Log.w(TAG, "Location foreground service unavailable; keeping Bluetooth guard active", e)
+                    startForeground(NOTIFICATION_ID_GUARD, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                    locationForegroundAvailable = false
+                }
             } else {
                 startForeground(NOTIFICATION_ID_GUARD, notification)
+                locationForegroundAvailable = true
             }
+            foregroundStarted = true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground service", e)
+            stopSelf()
+            return
         }
 
+        locationTracker.stopTracking()
+        if (currentConfig.isGuardEnabled && locationForegroundAvailable) {
+            locationTracker.startTracking()
+        } else {
+            locationTracker.stopTracking()
+        }
         checkInitialConnectionState()
     }
 
@@ -173,10 +198,18 @@ class WatchGuardService : Service() {
             preferences.guardConfigFlow.collectLatest { config ->
                 currentConfig = config
                 if (!config.isGuardEnabled) {
+                    debounceJob?.cancel()
+                    _debounceCountdown.value = 0
+                    locationJob?.cancel()
+                    locationTracker.stopTracking()
+                    alertPlayer.stopAlarm()
+                    dismissAlarmNotification()
                     _guardStatus.value = GuardStatus.STOPPED
                     updateOngoingNotification("守护已暂停")
                     return@collectLatest
                 }
+
+                if (foregroundStarted && locationForegroundAvailable) locationTracker.startTracking()
 
                 if (config.targetDeviceAddress.isNullOrBlank()) {
                     _guardStatus.value = GuardStatus.NO_TARGET_DEVICE
@@ -235,6 +268,7 @@ class WatchGuardService : Service() {
      * 收到蓝牙设备连接成功
      */
     private fun onDeviceConnected(device: BluetoothDevice?) {
+        if (!currentConfig.isGuardEnabled) return
         val targetMac = currentConfig.targetDeviceAddress ?: return
         if (device == null || device.address.equals(targetMac, ignoreCase = true)) {
             Log.i(TAG, "Target device reconnected! Canceling debounce if active.")
@@ -258,6 +292,7 @@ class WatchGuardService : Service() {
      * 收到蓝牙设备断连事件
      */
     private fun onDeviceDisconnected(device: BluetoothDevice?) {
+        if (!currentConfig.isGuardEnabled) return
         val targetMac = currentConfig.targetDeviceAddress ?: return
         // 如果断开的设备是目标手表，或者设备为空(如蓝牙被关闭)
         if (device == null || device.address.equals(targetMac, ignoreCase = true)) {
@@ -300,30 +335,39 @@ class WatchGuardService : Service() {
      * 触发断连核心流程：定位抓取 + 强警报 + 数据持久化
      */
     private fun triggerLostEvent() {
-        wakeLock?.acquire(30_000L) // 保持 CPU 唤醒 30 秒以确保完成定位与播报
+        if (!currentConfig.isGuardEnabled) return
+        val pendingRecord = DisconnectRecord(
+            timestamp = System.currentTimeMillis(),
+            deviceName = currentConfig.targetDeviceName ?: "手表",
+            deviceAddress = currentConfig.targetDeviceAddress ?: "",
+            locationNote = "正在获取手机位置，最多等待 30 秒"
+        )
+        locationJob?.cancel()
+        _guardStatus.value = GuardStatus.ALARMING
+        triggerAlert(isTest = false)
+        postAlarmNotification(pendingRecord)
+        wakeLock?.acquire(35_000L)
 
-        serviceScope.launch {
-            _guardStatus.value = GuardStatus.ALARMING
-
-            // 1. 抓取断连瞬间精确 GPS 坐标
-            val location = locationTracker.getCurrentLocation()
-            val record = DisconnectRecord(
-                timestamp = System.currentTimeMillis(),
-                latitude = location?.latitude ?: 0.0,
-                longitude = location?.longitude ?: 0.0,
-                accuracy = location?.accuracy ?: 0.0f,
-                deviceName = currentConfig.targetDeviceName ?: "HUAWEI WATCH GT 4",
-                deviceAddress = currentConfig.targetDeviceAddress ?: ""
-            )
-
-            // 2. 保存记录
-            preferences.saveDisconnectRecord(record)
-
-            // 3. 触发强警报 (声音 + 震动 + TTS)
-            triggerAlert(isTest = false)
-
-            // 4. 发送高优先级横幅警报通知
-            postAlarmNotification(record)
+        locationJob = serviceScope.launch {
+            try {
+                preferences.saveDisconnectRecord(pendingRecord)
+                val capture = if (foregroundStarted && !locationForegroundAvailable) {
+                    LocationCapture(null, "后台定位未启用，请打开应用后重新开启守护")
+                } else {
+                    locationTracker.captureLocation()
+                }
+                preferences.updateDisconnectRecordIfCurrent(pendingRecord.copy(
+                    latitude = capture.location?.latitude ?: 0.0,
+                    longitude = capture.location?.longitude ?: 0.0,
+                    accuracy = capture.location?.accuracy ?: 0.0f,
+                    locationNote = capture.note
+                ))
+            } catch (e: CancellationException) {
+                withContext(NonCancellable) {
+                    preferences.updateDisconnectRecordIfCurrent(pendingRecord.copy(locationNote = "定位已停止，未获取到坐标"))
+                }
+                throw e
+            }
         }
     }
 
@@ -443,6 +487,7 @@ class WatchGuardService : Service() {
             Log.w(TAG, "Receiver not registered", e)
         }
         alertPlayer.release()
+        locationTracker.stopTracking()
         serviceScope.cancel()
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
