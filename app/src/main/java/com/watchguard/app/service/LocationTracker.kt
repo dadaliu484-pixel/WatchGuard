@@ -1,86 +1,171 @@
 package com.watchguard.app.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
-import android.os.Build
+import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
-import com.google.android.gms.location.CurrentLocationRequest
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.CancellationTokenSource
+import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import com.watchguard.app.util.PermissionHelper
-import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
-/**
- * 高精度定位抓取器 (优先 FusedLocationProviderClient，降级 LocationManager)
- */
+data class LocationCapture(val location: Location?, val note: String)
+
+/** Uses the phone's native providers, including on phones without Google Play services. */
 class LocationTracker(private val context: Context) {
-
-    private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
     private val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+    private var lastFix: Location? = null
+    private var tracking = false
 
-    /**
-     * 立即获取当前高精度坐标
-     */
+    private val trackingListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            if (isFresh(location)) lastFix = Location(location)
+        }
+        override fun onProviderEnabled(provider: String) = Unit
+        override fun onProviderDisabled(provider: String) = Unit
+        @Deprecated("Required on Android 8 and 9")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
+    }
+
+    fun isLocationEnabled(): Boolean = locationManager?.let {
+        LocationManagerCompat.isLocationEnabled(it)
+    } == true
+
+    /** Keep a recent fix while the user has enabled the foreground guard. */
     @SuppressLint("MissingPermission")
-    suspend fun getCurrentLocation(): Location? {
-        if (!PermissionHelper.hasLocationPermission(context)) {
-            Log.w(TAG, "Location permission not granted")
-            return null
+    fun startTracking() {
+        if (tracking || !PermissionHelper.hasLocationPermission(context) || !isLocationEnabled()) return
+        val manager = locationManager ?: return
+        for (provider in activeProviders()) {
+            try {
+                manager.requestLocationUpdates(provider, 30_000L, 10f, trackingListener, Looper.getMainLooper())
+                tracking = true
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Cannot monitor location provider $provider", e)
+            }
         }
+    }
 
-        // 1. 尝试使用 Google Play Services FusedLocationProviderClient (限时 5 秒)
+    fun stopTracking() {
         try {
-            val cancellationTokenSource = CancellationTokenSource()
-            val request = CurrentLocationRequest.Builder()
-                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-                .setMaxUpdateAgeMillis(10_000)
-                .setDurationMillis(5_000)
-                .build()
-
-            val location = withTimeoutOrNull(5_000L) {
-                fusedClient.getCurrentLocation(request, cancellationTokenSource.token).await()
-            }
-
-            if (location != null && (location.latitude != 0.0 || location.longitude != 0.0)) {
-                Log.d(TAG, "Fused location acquired: lat=${location.latitude}, lng=${location.longitude}, acc=${location.accuracy}")
-                return location
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "FusedLocationProviderClient failed, trying fallback: ${e.message}")
+            locationManager?.removeUpdates(trackingListener)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Cannot stop location updates", e)
         }
-
-        // 2. 降级方案：使用原生 LocationManager 的最后已知位置或直接请求
-        return getBestLastKnownLocation()
+        tracking = false
+        lastFix = null
     }
 
     @SuppressLint("MissingPermission")
-    private fun getBestLastKnownLocation(): Location? {
-        val lm = locationManager ?: return null
-        var bestLocation: Location? = null
-
-        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
-        for (provider in providers) {
+    suspend fun captureLocation(): LocationCapture {
+        if (!PermissionHelper.hasLocationPermission(context)) {
+            return LocationCapture(null, "未授予定位权限，请在应用权限中允许位置访问")
+        }
+        if (!isLocationEnabled()) {
+            return LocationCapture(null, "手机位置信息已关闭，请打开系统定位开关")
+        }
+        val manager = locationManager ?: return LocationCapture(null, "手机定位服务不可用")
+        val providers = activeProviders()
+        val cached = (listOfNotNull(lastFix) + providers.mapNotNull { provider ->
             try {
-                if (lm.isProviderEnabled(provider)) {
-                    val loc = lm.getLastKnownLocation(provider) ?: continue
-                    if (bestLocation == null || loc.accuracy < bestLocation.accuracy) {
-                        bestLocation = loc
+                manager.getLastKnownLocation(provider)
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Cannot read cached location from $provider", e)
+                null
+            }
+        }).filter(::isFresh).minByOrNull { locationAgeMillis(it) }
+        if (cached != null) {
+            return LocationCapture(cached, "使用 ${locationAgeMillis(cached) / 1000} 秒前的手机位置" + precisionNote())
+        }
+        if (providers.isEmpty()) {
+            return LocationCapture(null, "没有可用的定位来源，请开启定位并允许精确位置")
+        }
+
+        val signals = mutableListOf<CancellationSignal>()
+        val location = try {
+            withTimeoutOrNull(30_000L) {
+                suspendCancellableCoroutine<Location?> { continuation ->
+                    var pending = providers.size
+                    continuation.invokeOnCancellation { signals.forEach { it.cancel() } }
+                    for (provider in providers) {
+                        val signal = CancellationSignal()
+                        signals.add(signal)
+                        try {
+                            LocationManagerCompat.getCurrentLocation(
+                                manager, provider, signal, ContextCompat.getMainExecutor(context)
+                            ) { fix ->
+                                if (continuation.isActive) {
+                                    if (fix != null && isFresh(fix)) {
+                                        continuation.resume(fix)
+                                    } else if (--pending == 0) {
+                                        continuation.resume(null)
+                                    }
+                                }
+                            }
+                        } catch (e: RuntimeException) {
+                            Log.w(TAG, "Cannot request location from $provider", e)
+                            if (--pending == 0 && continuation.isActive) continuation.resume(null)
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Error accessing provider: $provider", e)
+            }
+        } finally {
+            signals.forEach { it.cancel() }
+        }
+        return if (location != null) {
+            lastFix = Location(location)
+            LocationCapture(location, "手机在失联附近的位置" + precisionNote())
+        } else {
+            LocationCapture(null, "30 秒内未获得定位，请到室外或开启网络后再次测试")
+        }
+    }
+
+    private fun activeProviders(): List<String> {
+        val manager = locationManager ?: return emptyList()
+        val candidates = if (hasFinePermission()) {
+            listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
+        } else {
+            listOf(LocationManager.NETWORK_PROVIDER)
+        }
+        return candidates.filter { provider ->
+            try {
+                manager.isProviderEnabled(provider)
+            } catch (e: RuntimeException) {
+                false
             }
         }
-
-        Log.d(TAG, "Fallback last known location: $bestLocation")
-        return bestLocation
     }
+
+    private fun hasFinePermission(): Boolean = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+
+    private fun precisionNote(): String = if (hasFinePermission()) "" else "（大致位置）"
+
+    private fun locationAgeMillis(location: Location): Long = if (location.elapsedRealtimeNanos > 0) {
+        (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000
+    } else {
+        System.currentTimeMillis() - location.time
+    }
+
+    private fun isFresh(location: Location): Boolean =
+        location.latitude.isFinite() && location.longitude.isFinite() &&
+            location.latitude in -90.0..90.0 && location.longitude in -180.0..180.0 &&
+            (location.latitude != 0.0 || location.longitude != 0.0) &&
+            locationAgeMillis(location) in 0..MAX_LOCATION_AGE_MS
 
     companion object {
         private const val TAG = "LocationTracker"
+        const val MAX_LOCATION_AGE_MS = 60_000L
     }
 }
