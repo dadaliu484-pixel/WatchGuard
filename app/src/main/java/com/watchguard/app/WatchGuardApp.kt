@@ -1,6 +1,7 @@
 package com.watchguard.app
 
 import android.app.Application
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.media.AudioAttributes
@@ -47,7 +48,7 @@ class WatchGuardApp : Application() {
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 500, 200, 500, 200, 1000)
                 setSound(alarmSound, audioAttributes)
-                lockscreenVisibility = NotificationChannel.VISIBILITY_PUBLIC
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 setBypassDnd(true)
             }
 

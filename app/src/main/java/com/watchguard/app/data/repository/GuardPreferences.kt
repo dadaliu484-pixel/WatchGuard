@@ -43,6 +43,7 @@ class GuardPreferences(private val context: Context) {
         val KEY_LAST_DISCONNECT_ACCURACY = floatPreferencesKey("last_disconnect_accuracy")
         val KEY_LAST_DISCONNECT_DEVICE_NAME = stringPreferencesKey("last_disconnect_device_name")
         val KEY_LAST_DISCONNECT_DEVICE_ADDR = stringPreferencesKey("last_disconnect_device_addr")
+        val KEY_LAST_DISCONNECT_LOCATION_NOTE = stringPreferencesKey("last_disconnect_location_note")
     }
 
     val guardConfigFlow: Flow<GuardConfig> = context.dataStore.data.map { prefs ->
@@ -67,7 +68,8 @@ class GuardPreferences(private val context: Context) {
             longitude = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_LNG] ?: 0.0,
             accuracy = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_ACCURACY] ?: 0.0f,
             deviceName = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_DEVICE_NAME] ?: "",
-            deviceAddress = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_DEVICE_ADDR] ?: ""
+            deviceAddress = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_DEVICE_ADDR] ?: "",
+            locationNote = prefs[PreferencesKeys.KEY_LAST_DISCONNECT_LOCATION_NOTE] ?: ""
         )
     }
 
@@ -119,13 +121,23 @@ class GuardPreferences(private val context: Context) {
     }
 
     suspend fun saveDisconnectRecord(record: DisconnectRecord) {
+        writeDisconnectRecord(record, onlyIfCurrent = false)
+    }
+
+    suspend fun updateDisconnectRecordIfCurrent(record: DisconnectRecord) {
+        writeDisconnectRecord(record, onlyIfCurrent = true)
+    }
+
+    private suspend fun writeDisconnectRecord(record: DisconnectRecord, onlyIfCurrent: Boolean) {
         context.dataStore.edit { prefs ->
+            if (onlyIfCurrent && prefs[PreferencesKeys.KEY_LAST_DISCONNECT_TIME] != record.timestamp) return@edit
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_TIME] = record.timestamp
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_LAT] = record.latitude
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_LNG] = record.longitude
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_ACCURACY] = record.accuracy
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_DEVICE_NAME] = record.deviceName
             prefs[PreferencesKeys.KEY_LAST_DISCONNECT_DEVICE_ADDR] = record.deviceAddress
+            prefs[PreferencesKeys.KEY_LAST_DISCONNECT_LOCATION_NOTE] = record.locationNote
         }
     }
 
