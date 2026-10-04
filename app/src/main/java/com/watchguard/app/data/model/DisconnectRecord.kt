@@ -5,7 +5,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 手表断连瞬间 GPS 坐标与时间记录模型
+ * 手表失联时间与手机在断连附近的位置记录
  */
 data class DisconnectRecord(
     val timestamp: Long = System.currentTimeMillis(),
@@ -14,7 +14,8 @@ data class DisconnectRecord(
     val accuracy: Float = 0.0f,
     val deviceName: String = "",
     val deviceAddress: String = "",
-    val addressText: String = ""
+    val addressText: String = "",
+    val locationNote: String = ""
 ) {
     val formattedTime: String
         get() {
