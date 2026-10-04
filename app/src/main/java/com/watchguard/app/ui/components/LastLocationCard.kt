@@ -76,7 +76,7 @@ fun LastLocationCard(
                     }
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "最后失联位置 (GPS)",
+                        text = "最后失联位置",
                         style = MaterialTheme.typography.titleMedium,
                         color = LightTextPrimary,
                         fontWeight = FontWeight.SemiBold
@@ -101,6 +101,15 @@ fun LastLocationCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            Text(
+                text = "记录手机在手表断连附近的位置；无法远程读取手表 GPS。",
+                color = LightTextMuted,
+                fontSize = 12.sp,
+                lineHeight = 18.sp
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             if (record != null) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -123,6 +132,16 @@ fun LastLocationCard(
                             color = if (record.hasValidCoordinates) LightTextPrimary else GuardRed,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    if (record.locationNote.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = record.locationNote,
+                            color = LightTextSecondary,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp
                         )
                     }
 
@@ -160,7 +179,7 @@ fun LastLocationCard(
                 }
             } else {
                 Text(
-                    text = "暂无失联记录。当手表脱离连接范围时，系统将在此精确标记断连瞬间的地理位置并提供一键寻回导航。",
+                    text = "暂无失联记录。手表断连后会尝试获取手机位置，成功后可打开地图查看。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = LightTextMuted,
                     fontSize = 12.sp,
