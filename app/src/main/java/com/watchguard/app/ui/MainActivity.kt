@@ -24,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
 import com.watchguard.app.service.WatchGuardService
 import com.watchguard.app.ui.screens.HomeScreen
 import com.watchguard.app.ui.screens.HyperOsGuideScreen
@@ -99,6 +100,15 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         viewModel.checkPermissions()
         viewModel.refreshPairedDevices()
+        // Starting while visible also restores location access after a boot or permission change.
+        lifecycleScope.launch {
+            val config = com.watchguard.app.data.repository.GuardPreferences.getInstance(this@MainActivity).getGuardConfig()
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                config.isGuardEnabled && !config.targetDeviceAddress.isNullOrBlank() &&
+                PermissionHelper.hasBluetoothPermission(this@MainActivity)) {
+                WatchGuardService.start(this@MainActivity)
+            }
+        }
     }
 
     override fun onStop() {
