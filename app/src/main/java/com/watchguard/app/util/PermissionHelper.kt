@@ -42,9 +42,7 @@ object PermissionHelper {
      * 检查是否所有必要权限均已授予
      */
     fun hasAllRequiredPermissions(context: Context): Boolean {
-        return getRequiredPermissions().all { perm ->
-            ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
-        }
+        return getMissingPermissions(context).isEmpty()
     }
 
     /**
@@ -65,12 +63,15 @@ object PermissionHelper {
     }
 
     /**
-     * 检查是否有高精度定位权限
+     * 检查是否有定位权限（允许用户选择大致位置）
      */
     fun hasLocationPermission(context: Context): Boolean {
         return ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
     }
 
@@ -79,7 +80,13 @@ object PermissionHelper {
      */
     fun getMissingPermissions(context: Context): List<String> {
         return getRequiredPermissions().filter { perm ->
-            ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
+            if (perm == Manifest.permission.ACCESS_FINE_LOCATION ||
+                perm == Manifest.permission.ACCESS_COARSE_LOCATION
+            ) {
+                !hasLocationPermission(context)
+            } else {
+                ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED
+            }
         }
     }
 }
